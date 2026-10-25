@@ -77,9 +77,11 @@ def main():
     else:
         result = call(data, 'POST', args.operation, {})
         if args.operation in ('start', 'restart'):
-            result = wait(data, {'running'}, 300)
+            result = wait(data, {'running'}, int(os.environ.get(
+                'VULFOCUS_AGENT_START_TIMEOUT', '1800')))
         elif args.operation == 'stop':
-            result = wait(data, {'stopped'}, 90)
+            result = wait(data, {'stopped'}, int(os.environ.get(
+                'VULFOCUS_AGENT_STOP_TIMEOUT', '600')))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
