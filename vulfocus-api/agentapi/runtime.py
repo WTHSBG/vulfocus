@@ -117,6 +117,24 @@ def locked(name):
 
 def ensure_images(item):
     manifest = catalog()
+    # Reusing an already verified local image must not wait behind an unrelated
+    # multi-gigabyte import; in particular, an active solver may restart its
+    # own challenge while a catalog audit imports other images.
+    all_present = True
+    for image_key in item['tasks']:
+        record = manifest['images'].get(image_key)
+        if not record or record.get('status') != 'verified':
+            raise RuntimeError('镜像归档未通过校验：' + image_key)
+        if record.get('architecture') != 'amd64':
+            raise RuntimeError('镜像架构不是 amd64：' + image_key)
+        try:
+            present = client.images.get('ctf-offline/runtime:' + image_key)
+            if present.id != record['image_id']:
+                raise RuntimeError('本地镜像与离线清单的固定版本不一致：' + image_key)
+        except ImageNotFound:
+            all_present = False
+    if all_present:
+        return
     lock = locked('image-import')
     try:
         managed_path = state_root() / 'managed-images.json'

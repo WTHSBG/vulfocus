@@ -119,3 +119,15 @@ class AgentApiTests(TestCase):
         self.assertEqual(result['title'], 'Example Vulnerability')
         self.assertEqual(result['description'], 'Question text')
         self.assertEqual(result['flag_support_status'], 'supported')
+
+    @patch('agentapi.runtime.locked', side_effect=AssertionError('unnecessary import lock'))
+    @patch('agentapi.runtime.client')
+    @patch('agentapi.runtime.catalog')
+    def test_existing_verified_image_skips_import_lock(self, catalog, docker_client, _lock):
+        from .runtime import ensure_images
+        catalog.return_value = {'images': {'image-key': {
+            'status': 'verified', 'architecture': 'amd64',
+            'image_id': 'sha256:expected'}}}
+        docker_client.images.get.return_value.id = 'sha256:expected'
+        ensure_images({'tasks': ['image-key']})
+        docker_client.images.get.assert_called_once_with('ctf-offline/runtime:image-key')
