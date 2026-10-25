@@ -122,13 +122,25 @@ def verify_loaded_image(image, record, image_key):
         raise RuntimeError('本地镜像不是 linux/amd64：' + image_key)
 
 
+def required_images(item):
+    """Only service images are needed to launch; other tasks are provenance."""
+    archived = set(item.get('tasks') or [])
+    used = list(dict.fromkeys((item.get('services') or {}).values()))
+    if not used:
+        used = list(item.get('tasks') or [])
+    if not set(used).issubset(archived):
+        raise RuntimeError('编排引用了清单之外的镜像')
+    return used
+
+
 def ensure_images(item):
     manifest = catalog()
+    image_keys = required_images(item)
     # Reusing an already verified local image must not wait behind an unrelated
     # multi-gigabyte import; in particular, an active solver may restart its
     # own challenge while a catalog audit imports other images.
     all_present = True
-    for image_key in item['tasks']:
+    for image_key in image_keys:
         record = manifest['images'].get(image_key)
         if not record or record.get('status') != 'verified':
             raise RuntimeError('镜像归档未通过校验：' + image_key)
@@ -145,7 +157,7 @@ def ensure_images(item):
     try:
         managed_path = state_root() / 'managed-images.json'
         managed = json.loads(managed_path.read_text()) if managed_path.exists() else {}
-        for image_key in item['tasks']:
+        for image_key in image_keys:
             record = manifest['images'].get(image_key)
             if not record or record.get('status') != 'verified':
                 raise RuntimeError('镜像归档未通过校验：' + image_key)
@@ -172,17 +184,32 @@ def ensure_images(item):
             minimum = int(os.environ.get('VULFOCUS_AGENT_MIN_FREE_GIB', '10')) * 1024 ** 3
             if free - int(record.get('image_size', 0)) < minimum:
                 raise RuntimeError('导入后资源卷可用空间会低于预留阈值')
+            archive_tags = record.get('archive_tags') or []
+            if not archive_tags:
+                raise RuntimeError('镜像归档没有可导入标签：' + image_key)
             new_tags = []
-            for archive_tag in record.get('archive_tags', []):
+            existing_alias = None
+            for archive_tag in archive_tags:
                 try:
-                    client.images.get(archive_tag)
+                    candidate = client.images.get(archive_tag)
+                    verify_loaded_image(candidate, record, image_key)
+                    existing_alias = candidate
                 except ImageNotFound:
                     new_tags.append(archive_tag)
-            # APIClient accepts a file-like stream, avoiding a multi-GB read.
-            with gzip.open(str(archive), 'rb') as source:
-                for event in api_docker_client.load_image(source, quiet=True):
-                    if event.get('error'):
-                        raise RuntimeError('Docker 导入失败：' + event['error'])
+            if existing_alias:
+                existing_alias.tag('ctf-offline/runtime', tag=image_key)
+                new_tags = [tag]
+            else:
+                # APIClient accepts a file-like stream, avoiding a multi-GB read.
+                with gzip.open(str(archive), 'rb') as source:
+                    for event in api_docker_client.load_image(source, quiet=True):
+                        if event.get('error'):
+                            raise RuntimeError('Docker 导入失败：' + event['error'])
+                if tag not in archive_tags:
+                    loaded = client.images.get(archive_tags[0])
+                    verify_loaded_image(loaded, record, image_key)
+                    loaded.tag('ctf-offline/runtime', tag=image_key)
+                    new_tags.append(tag)
             imported = client.images.get(tag)
             verify_loaded_image(imported, record, image_key)
             managed[image_key] = new_tags
@@ -202,7 +229,7 @@ def primary_service(compose):
     return 'target' if 'target' in services else next(iter(services))
 
 
-def write_override(compose, target, environment, destination):
+def write_override(compose, target, environment, destination, service_tmpfs=None):
     """Publish each container port on a fresh host port for this run.
 
     The offline catalog preserves upstream Compose files, some of which pin
@@ -218,12 +245,22 @@ def write_override(compose, target, environment, destination):
         lambda dumper, value: dumper.represent_sequence('!override', value))
     source = yaml.safe_load(compose.read_text())
     services = {}
+    service_tmpfs = service_tmpfs or {}
+    unknown = set(service_tmpfs) - set(source.get('services') or {})
+    if unknown:
+        raise RuntimeError('临时目录配置指向未知服务：' + ', '.join(sorted(unknown)))
     for name, original in (source.get('services') or {}).items():
         patch = {'environment': ({**environment} if name == target else
                                  {'vul_flag': environment['vul_flag']})}
         if original.get('ports'):
             patch['ports'] = OverrideList([
                 str(port).rsplit(':', 1)[-1] for port in original['ports']])
+        if name in service_tmpfs:
+            values = service_tmpfs[name]
+            if not isinstance(values, list) or not all(
+                    isinstance(value, str) and value.startswith('/') for value in values):
+                raise RuntimeError('临时目录配置无效：' + name)
+            patch['tmpfs'] = values
         if patch:
             services[name] = patch
     destination.write_text(yaml.dump({'services': services}, Dumper=Dumper,
@@ -269,8 +306,16 @@ def wait_ready(project, service):
         if found:
             for container in found:
                 container.reload()
-            if any(c.status == 'exited' for c in found):
-                raise RuntimeError('题目容器提前退出')
+            exited = [c for c in found if c.status == 'exited']
+            if exited:
+                details = []
+                for container in exited:
+                    labels = container.attrs.get('Config', {}).get('Labels') or {}
+                    state = container.attrs.get('State') or {}
+                    name = labels.get('com.docker.compose.service') or container.name
+                    details.append('%s exit=%s oom=%s' % (name,
+                        state.get('ExitCode'), bool(state.get('OOMKilled'))))
+                raise RuntimeError('题目容器提前退出：' + ', '.join(details))
             if all(c.status == 'running' and
                    c.attrs.get('State', {}).get('Health', {}).get('Status') != 'unhealthy'
                    for c in found):
@@ -292,6 +337,11 @@ def wait_ready(project, service):
                 else:
                     raise RuntimeError('题目没有可访问的映射端口')
             else:
+                last = ', '.join('%s=%s/%s' % (
+                    (c.attrs.get('Config', {}).get('Labels') or {}).get(
+                        'com.docker.compose.service', c.name), c.status,
+                    (c.attrs.get('State', {}).get('Health') or {}).get('Status', 'none'))
+                    for c in found)
                 stable_since = None
         time.sleep(2)
     raise RuntimeError('题目未就绪：' + last[:300])
@@ -312,11 +362,14 @@ def start_run(run, flag):
     root.mkdir(parents=True, exist_ok=True)
     override = root / ('generation-%s.yml' % run.generation)
     environment = {'vul_flag': flag}
+    service_tmpfs = {}
     overrides_path = os.environ.get('VULFOCUS_AGENT_OVERRIDES')
     if overrides_path:
         overrides = json.loads(Path(overrides_path).read_text())
-        environment.update(overrides.get(run.challenge_key, {}).get('environment', {}))
-    write_override(compose, service, environment, override)
+        challenge_override = overrides.get(run.challenge_key, {})
+        environment.update(challenge_override.get('environment', {}))
+        service_tmpfs = challenge_override.get('tmpfs', {})
+    write_override(compose, service, environment, override, service_tmpfs)
     project = 'vfa-%s-%s' % (run.pk, run.generation)
     command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
     for container in containers(project):
@@ -342,6 +395,34 @@ def stop_run(run):
         command(run.project, compose, override, ['down', '--remove-orphans'])
 
 
+def capture_failure(run):
+    """Keep bounded, private startup diagnostics before Compose removes containers."""
+    if not run.project:
+        return
+    entries = []
+    for container in containers(run.project):
+        try:
+            container.reload()
+            labels = container.attrs.get('Config', {}).get('Labels') or {}
+            state = container.attrs.get('State') or {}
+            tail = container.logs(tail=80, timestamps=True).decode('utf-8', 'replace')[-8192:]
+            tail = re.sub(r'flag-\{[^}]{1,256}\}', '[redacted-flag]', tail)
+            entries.append({'service': labels.get('com.docker.compose.service') or
+                            container.name, 'exit_code': state.get('ExitCode'),
+                            'oom_killed': bool(state.get('OOMKilled')),
+                            'state_error': state.get('Error'), 'log_tail': tail})
+        except Exception as exc:
+            entries.append({'service': container.name,
+                            'diagnostic_error': str(exc)[:300]})
+    if entries:
+        directory = state_root() / ('run-' + str(run.pk))
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / ('startup-failure-%s.json' % run.generation)
+        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, 'w') as output:
+            json.dump(entries, output, ensure_ascii=False)
+
+
 def release_images(run):
     """Remove only tags introduced by this feature and unused by other runs."""
     from .models import AgentRun
@@ -355,10 +436,10 @@ def release_images(run):
         for other in AgentRun.objects.filter(status__in=('starting', 'running', 'restarting', 'stopping')):
             if other.pk != run.pk:
                 try:
-                    needed.update(unit(other.challenge_key)['tasks'])
+                    needed.update(required_images(unit(other.challenge_key)))
                 except ValueError:
                     pass
-        for image_key in unit(run.challenge_key)['tasks']:
+        for image_key in required_images(unit(run.challenge_key)):
             if image_key in needed or image_key not in managed:
                 continue
             remaining = []

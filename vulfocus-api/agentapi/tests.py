@@ -1,11 +1,14 @@
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from django.test import TestCase
+from docker.errors import ImageNotFound
 from .models import AgentRun
 
 
@@ -91,12 +94,17 @@ class AgentApiTests(TestCase):
             output = Path(directory) / 'override.yml'
             source.write_text('services:\n  master:\n    ports:\n      - "8080:8080"\n'
                               '  slave:\n    ports:\n      - "8081:8081"\n')
-            write_override(source, 'master', {'vul_flag': 'test-flag'}, output)
+            write_override(source, 'master', {
+                'vul_flag': 'test-flag',
+                'LANGFLOW_DATABASE_URL': 'sqlite:////app/data/langflow.db'},
+                output, {'master': ['/app/data:uid=1000,gid=0,mode=1777']})
             text = output.read_text()
         self.assertEqual(text.count('!override'), 2)
         self.assertNotIn('8080:8080', text)
         self.assertNotIn('8081:8081', text)
         self.assertIn('vul_flag', text)
+        self.assertIn('LANGFLOW_DATABASE_URL', text)
+        self.assertIn('/app/data:uid=1000,gid=0,mode=1777', text)
 
     def test_challenge_title_and_flag_status_resolve_by_image_name(self):
         from .runtime import public_challenge
@@ -147,6 +155,49 @@ class AgentApiTests(TestCase):
         with self.assertRaisesRegex(RuntimeError, 'linux/amd64'):
             ensure_images({'tasks': ['image-key']})
 
+    def test_provenance_image_is_not_imported_for_prepared_service(self):
+        from .runtime import required_images
+        self.assertEqual(required_images({'tasks': ['original', 'prepared'],
+                         'services': {'target': 'prepared'}}), ['prepared'])
+
+    @patch('agentapi.runtime.client')
+    @patch('agentapi.runtime.catalog')
+    def test_existing_archive_alias_gets_local_runtime_tag(self, catalog, docker_client):
+        from .runtime import ensure_images
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'image.tar.gz').write_bytes(b'verified archive')
+            catalog.return_value = {'images': {'image-key': {
+                'status': 'verified', 'architecture': 'amd64',
+                'image_id': 'sha256:expected', 'archive': 'image.tar.gz',
+                'sha256': hashlib.sha256(b'verified archive').hexdigest(),
+                'archive_tags': ['mysql:5.7'], 'image_size': 0}}}
+            image = Mock()
+            image.id = 'sha256:expected'
+            image.attrs = {'Os': 'linux', 'Architecture': 'amd64'}
+            tagged = [False]
+
+            def get(name):
+                if name == 'mysql:5.7' or tagged[0]:
+                    return image
+                raise ImageNotFound('missing')
+
+            def tag(*_args, **_kwargs):
+                tagged[0] = True
+
+            docker_client.images.get.side_effect = get
+            image.tag.side_effect = tag
+            with patch('agentapi.runtime.package_root', return_value=root), \
+                 patch('agentapi.runtime.state_root', return_value=root), \
+                 patch('agentapi.runtime.locked', return_value=io.StringIO()), \
+                 patch('agentapi.runtime.shutil.disk_usage',
+                       return_value=Mock(free=1024 ** 4)):
+                ensure_images({'tasks': ['image-key'],
+                               'services': {'db': 'image-key'}})
+            image.tag.assert_called_once_with('ctf-offline/runtime', tag='image-key')
+            managed = json.loads((root / 'managed-images.json').read_text())
+            self.assertEqual(managed['image-key'], ['ctf-offline/runtime:image-key'])
+
     @patch('agentapi.runtime.compose_path', side_effect=AssertionError('started after cancellation'))
     @patch('agentapi.runtime.ensure_images')
     @patch('agentapi.runtime.unit', return_value={'tasks': ['image-key']})
@@ -158,3 +209,33 @@ class AgentApiTests(TestCase):
         run.save()
         with self.assertRaisesRegex(RuntimeError, '已取消'):
             start_run(run, 'flag-{test}')
+
+    @patch('agentapi.runtime.containers')
+    def test_early_exit_reports_service_and_exit_code(self, containers):
+        from .runtime import wait_ready
+        container = Mock()
+        container.status = 'exited'
+        container.attrs = {'Config': {'Labels': {
+            'com.docker.compose.service': 'target'}},
+            'State': {'ExitCode': 127, 'OOMKilled': False}}
+        containers.return_value = [container]
+        with self.assertRaisesRegex(RuntimeError, 'target exit=127 oom=False'):
+            wait_ready('project', 'target')
+
+    @patch('agentapi.runtime.containers')
+    def test_failure_diagnostic_is_private_and_redacts_flag(self, containers):
+        from .runtime import capture_failure
+        container = Mock()
+        container.attrs = {'Config': {'Labels': {
+            'com.docker.compose.service': 'target'}},
+            'State': {'ExitCode': 1, 'OOMKilled': False}}
+        container.logs.return_value = b'error flag-{hidden-value}'
+        containers.return_value = [container]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('agentapi.runtime.state_root', return_value=Path(directory)):
+            capture_failure(SimpleNamespace(pk=12, generation=1, project='test'))
+            path = Path(directory) / 'run-12/startup-failure-1.json'
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            text = path.read_text()
+            self.assertIn('[redacted-flag]', text)
+            self.assertNotIn('hidden-value', text)

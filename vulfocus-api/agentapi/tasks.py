@@ -44,6 +44,10 @@ def launch(run_id, restart=False):
             return
     except Exception as exc:
         try:
+            runtime.capture_failure(run)
+        except Exception:
+            pass  # Diagnostic collection must never prevent target cleanup.
+        try:
             runtime.stop_run(run)
             runtime.release_images(run)
         except Exception as cleanup_error:
