@@ -1,0 +1,320 @@
+"""Offline-only Docker lifecycle for agent runs.
+
+The solver never receives a Docker socket or an archive path. The API and
+Celery worker need the same read-only package mount and writable state mount.
+"""
+import fcntl
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import time
+from docker.errors import ImageNotFound
+
+from django.conf import settings
+from vulfocus.settings import client, api_docker_client, VUL_IP
+
+
+def package_root():
+    root = os.environ.get('VULFOCUS_AGENT_OFFLINE_ROOT', '')
+    if not root:
+        raise RuntimeError('VULFOCUS_AGENT_OFFLINE_ROOT 未配置')
+    return Path(root).resolve()
+
+
+def state_root():
+    root = Path(os.environ.get('VULFOCUS_AGENT_STATE_DIR',
+                               str(package_root() / 'data/agent-runs')))
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def catalog():
+    with (package_root() / 'manifest.json').open() as stream:
+        return json.load(stream)
+
+
+def unit(key):
+    if not key.startswith('catalog/'):
+        raise ValueError('仅允许目录中的独立题目')
+    item = catalog()['units'].get(key)
+    if not item or item.get('status') != 'ready' or not item.get('compose'):
+        raise ValueError('题目资源未齐全或不是独立题目')
+    return item
+
+
+def public_challenge(key):
+    item = unit(key)
+    desc = ''
+    source = package_root() / 'catalog-api.json'
+    if source.is_file():
+        suffix = key.rsplit('/', 1)[-1]
+        for image in json.loads(source.read_text()).get('imgs', []):
+            if image.get('image_id') == suffix:
+                desc = image.get('image_desc') or ''
+                break
+    return {'challenge_key': key, 'title': item.get('title') or key,
+            'description': desc, 'flag_supported': True}
+
+
+def compose_path(item):
+    root = package_root()
+    path = (root / item['compose']).resolve()
+    if root not in path.parents or not path.is_file():
+        raise RuntimeError('离线编排文件无效')
+    return path
+
+
+def locked(name):
+    """Caller closes the returned file after releasing flock."""
+    path = state_root() / (name + '.lock')
+    stream = path.open('a+')
+    fcntl.flock(stream, fcntl.LOCK_EX)
+    return stream
+
+
+def ensure_images(item):
+    manifest = catalog()
+    lock = locked('image-import')
+    try:
+        managed_path = state_root() / 'managed-images.json'
+        managed = json.loads(managed_path.read_text()) if managed_path.exists() else {}
+        for image_key in item['tasks']:
+            record = manifest['images'].get(image_key)
+            if not record or record.get('status') != 'verified':
+                raise RuntimeError('镜像归档未通过校验：' + image_key)
+            if record.get('architecture') != 'amd64':
+                raise RuntimeError('镜像架构不是 amd64：' + image_key)
+            tag = 'ctf-offline/runtime:' + image_key
+            try:
+                present = client.images.get(tag)
+                if present.id != record['image_id']:
+                    raise RuntimeError('本地镜像与离线清单的固定版本不一致：' + image_key)
+                continue
+            except ImageNotFound:
+                pass
+            root = package_root()
+            archive = (root / record['archive']).resolve()
+            if root not in archive.parents or not archive.is_file():
+                raise RuntimeError('镜像归档缺失：' + image_key)
+            digest = hashlib.sha256()
+            with archive.open('rb') as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            if digest.hexdigest() != record['sha256']:
+                raise RuntimeError('镜像归档校验失败：' + image_key)
+            free = shutil.disk_usage(str(state_root())).free
+            minimum = int(os.environ.get('VULFOCUS_AGENT_MIN_FREE_GIB', '10')) * 1024 ** 3
+            if free - int(record.get('image_size', 0)) < minimum:
+                raise RuntimeError('导入后资源卷可用空间会低于预留阈值')
+            new_tags = []
+            for archive_tag in record.get('archive_tags', []):
+                try:
+                    client.images.get(archive_tag)
+                except ImageNotFound:
+                    new_tags.append(archive_tag)
+            # APIClient accepts a file-like stream, avoiding a multi-GB read.
+            with gzip.open(str(archive), 'rb') as source:
+                for event in api_docker_client.load_image(source, quiet=True):
+                    if event.get('error'):
+                        raise RuntimeError('Docker 导入失败：' + event['error'])
+            imported = client.images.get(tag)
+            if imported.id != record['image_id']:
+                raise RuntimeError('导入镜像与离线清单的固定版本不一致：' + image_key)
+            managed[image_key] = new_tags
+            temporary = managed_path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(managed))
+            os.replace(str(temporary), str(managed_path))
+    finally:
+        lock.close()
+
+
+def primary_service(compose):
+    import yaml
+    data = yaml.safe_load(compose.read_text())
+    services = data.get('services') or {}
+    if not services:
+        raise RuntimeError('编排文件没有服务')
+    return 'target' if 'target' in services else next(iter(services))
+
+
+def write_override(compose, target, environment, destination):
+    """Publish each container port on a fresh host port for this run.
+
+    The offline catalog preserves upstream Compose files, some of which pin
+    host ports. Compose's !override tag replaces those bindings rather than
+    merging another list on top of them.
+    """
+    import yaml
+    class OverrideList(list):
+        pass
+    class Dumper(yaml.SafeDumper):
+        pass
+    Dumper.add_representer(OverrideList,
+        lambda dumper, value: dumper.represent_sequence('!override', value))
+    source = yaml.safe_load(compose.read_text())
+    services = {}
+    for name, original in (source.get('services') or {}).items():
+        patch = {'environment': ({**environment} if name == target else
+                                 {'vul_flag': environment['vul_flag']})}
+        if original.get('ports'):
+            patch['ports'] = OverrideList([
+                str(port).rsplit(':', 1)[-1] for port in original['ports']])
+        if patch:
+            services[name] = patch
+    destination.write_text(yaml.dump({'services': services}, Dumper=Dumper,
+                                     sort_keys=False))
+
+
+def command(project, compose, override, operation):
+    binary = os.environ.get('VULFOCUS_AGENT_COMPOSE', '/usr/local/bin/docker-compose')
+    argv = [binary, '-p', project, '-f', str(compose), '-f', str(override)] + operation
+    proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, timeout=180, env=dict(os.environ, DOCKER_HOST='unix:///var/run/docker.sock'))
+    if proc.returncode:
+        raise RuntimeError('Compose 失败：' + (proc.stderr or proc.stdout)[-1200:])
+    return proc.stdout
+
+
+def containers(project):
+    return client.containers.list(all=True,
+        filters={'label': 'com.docker.compose.project=' + project})
+
+
+def entrypoints(project, service):
+    result = {}
+    for container in containers(project):
+        container.reload()
+        labels = container.attrs.get('Config', {}).get('Labels') or {}
+        service_name = labels.get('com.docker.compose.service') or service
+        ports = container.attrs.get('NetworkSettings', {}).get('Ports') or {}
+        for internal, bindings in ports.items():
+            if not bindings:
+                continue
+            name = internal if service_name == service else service_name + '/' + internal
+            result[name] = VUL_IP + ':' + bindings[0]['HostPort']
+    return result
+
+
+def wait_ready(project, service):
+    deadline = time.monotonic() + 120
+    last = '容器尚未运行'
+    stable_since = None
+    while time.monotonic() < deadline:
+        found = containers(project)
+        if found:
+            for container in found:
+                container.reload()
+            if any(c.status == 'exited' for c in found):
+                raise RuntimeError('题目容器提前退出')
+            if all(c.status == 'running' and
+                   c.attrs.get('State', {}).get('Health', {}).get('Status') != 'unhealthy'
+                   for c in found):
+                endpoints = entrypoints(project, service)
+                if endpoints:
+                    try:
+                        for port_name, address in endpoints.items():
+                            if port_name.endswith('/udp'):
+                                continue
+                            host, port = address.rsplit(':', 1)
+                            with socket.create_connection((host, int(port)), timeout=2):
+                                pass
+                        stable_since = stable_since or time.monotonic()
+                        if time.monotonic() - stable_since >= 15:
+                            return endpoints
+                    except OSError as exc:
+                        last = str(exc)
+                        stable_since = None
+                else:
+                    raise RuntimeError('题目没有可访问的映射端口')
+            else:
+                stable_since = None
+        time.sleep(2)
+    raise RuntimeError('题目未就绪：' + last[:300])
+
+
+def start_run(run, flag):
+    item = unit(run.challenge_key)
+    ensure_images(item)
+    compose = compose_path(item)
+    service = primary_service(compose)
+    root = state_root() / ('run-' + str(run.pk))
+    root.mkdir(parents=True, exist_ok=True)
+    override = root / ('generation-%s.yml' % run.generation)
+    environment = {'vul_flag': flag}
+    overrides_path = os.environ.get('VULFOCUS_AGENT_OVERRIDES')
+    if overrides_path:
+        overrides = json.loads(Path(overrides_path).read_text())
+        environment.update(overrides.get(run.challenge_key, {}).get('environment', {}))
+    write_override(compose, service, environment, override)
+    project = 'vfa-%s-%s' % (run.pk, run.generation)
+    command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
+    for container in containers(project):
+        try:
+            result = container.exec_run(['sh', '-c', 'touch /tmp/' + flag])
+            if result.exit_code != 0:
+                raise RuntimeError('Flag 文件写入失败')
+        except Exception as exc:
+            raise RuntimeError('题目不支持本次 Flag 注入：' + str(exc))
+    return project, wait_ready(project, service)
+
+
+def stop_run(run):
+    if not run.project:
+        return
+    item = unit(run.challenge_key)
+    compose = compose_path(item)
+    directory = state_root() / ('run-' + str(run.pk))
+    override = directory / ('generation-%s.yml' % run.generation)
+    if not override.is_file():
+        override = directory / ('generation-%s.json' % run.generation)
+    if override.is_file():
+        command(run.project, compose, override, ['down', '--remove-orphans'])
+
+
+def release_images(run):
+    """Remove only tags introduced by this feature and unused by other runs."""
+    from .models import AgentRun
+    lock = locked('image-import')
+    try:
+        path = state_root() / 'managed-images.json'
+        if not path.exists():
+            return
+        managed = json.loads(path.read_text())
+        needed = set()
+        for other in AgentRun.objects.filter(status__in=('starting', 'running', 'restarting', 'stopping')):
+            if other.pk != run.pk:
+                try:
+                    needed.update(unit(other.challenge_key)['tasks'])
+                except ValueError:
+                    pass
+        for image_key in unit(run.challenge_key)['tasks']:
+            if image_key in needed or image_key not in managed:
+                continue
+            remaining = []
+            for tag in managed[image_key]:
+                try:
+                    client.images.remove(tag, force=False)
+                except Exception:
+                    remaining.append(tag)
+            if remaining:
+                managed[image_key] = remaining
+            else:
+                del managed[image_key]
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(managed))
+        os.replace(str(temporary), str(path))
+    finally:
+        lock.close()
+
+
+def crashed(run):
+    """Report a target that died after its initial readiness check."""
+    if not run.project:
+        return False
+    found = containers(run.project)
+    return not found or any(c.status != 'running' for c in found)
