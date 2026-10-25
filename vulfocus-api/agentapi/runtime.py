@@ -230,7 +230,8 @@ def primary_service(compose):
     return 'target' if 'target' in services else next(iter(services))
 
 
-def write_override(compose, target, environment, destination, service_tmpfs=None):
+def write_override(compose, target, environment, destination,
+                   service_tmpfs=None, service_commands=None):
     """Publish each container port on a fresh host port for this run.
 
     The offline catalog preserves upstream Compose files, some of which pin
@@ -247,7 +248,8 @@ def write_override(compose, target, environment, destination, service_tmpfs=None
     source = yaml.safe_load(compose.read_text())
     services = {}
     service_tmpfs = service_tmpfs or {}
-    unknown = set(service_tmpfs) - set(source.get('services') or {})
+    service_commands = service_commands or {}
+    unknown = (set(service_tmpfs) | set(service_commands)) - set(source.get('services') or {})
     if unknown:
         raise RuntimeError('临时目录配置指向未知服务：' + ', '.join(sorted(unknown)))
     for name, original in (source.get('services') or {}).items():
@@ -262,6 +264,12 @@ def write_override(compose, target, environment, destination, service_tmpfs=None
                     isinstance(value, str) and value.startswith('/') for value in values):
                 raise RuntimeError('临时目录配置无效：' + name)
             patch['tmpfs'] = values
+        if name in service_commands:
+            command = service_commands[name]
+            if not isinstance(command, list) or not command or not all(
+                    isinstance(part, str) and part for part in command):
+                raise RuntimeError('启动命令配置无效：' + name)
+            patch['command'] = command
         if patch:
             services[name] = patch
     destination.write_text(yaml.dump({'services': services}, Dumper=Dumper,
@@ -365,13 +373,16 @@ def start_run(run, flag, images_ready=False):
     override = root / ('generation-%s.yml' % run.generation)
     environment = {'vul_flag': flag}
     service_tmpfs = {}
+    service_commands = {}
     overrides_path = os.environ.get('VULFOCUS_AGENT_OVERRIDES')
     if overrides_path:
         overrides = json.loads(Path(overrides_path).read_text())
         challenge_override = overrides.get(run.challenge_key, {})
         environment.update(challenge_override.get('environment', {}))
         service_tmpfs = challenge_override.get('tmpfs', {})
-    write_override(compose, service, environment, override, service_tmpfs)
+        service_commands = challenge_override.get('command', {})
+    write_override(compose, service, environment, override,
+                   service_tmpfs, service_commands)
     project = 'vfa-%s-%s' % (run.pk, run.generation)
     command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
     for container in containers(project):

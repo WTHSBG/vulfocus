@@ -126,7 +126,8 @@ class AgentApiTests(TestCase):
             write_override(source, 'master', {
                 'vul_flag': 'test-flag',
                 'LANGFLOW_DATABASE_URL': 'sqlite:////app/data/langflow.db'},
-                output, {'master': ['/app/data:uid=1000,gid=0,mode=1777']})
+                output, {'master': ['/app/data:uid=1000,gid=0,mode=1777']},
+                {'master': ['/bin/sh', '-c', 'exec app']})
             text = output.read_text()
         self.assertEqual(text.count('!override'), 2)
         self.assertNotIn('8080:8080', text)
@@ -134,6 +135,7 @@ class AgentApiTests(TestCase):
         self.assertIn('vul_flag', text)
         self.assertIn('LANGFLOW_DATABASE_URL', text)
         self.assertIn('/app/data:uid=1000,gid=0,mode=1777', text)
+        self.assertIn('exec app', text)
 
     def test_challenge_title_and_flag_status_resolve_by_image_name(self):
         from .runtime import public_challenge

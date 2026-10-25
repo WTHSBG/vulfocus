@@ -30,8 +30,9 @@
 
 少数镜像需要在启动时补齐可写目录或固定本地数据库路径。部署方可用
 `VULFOCUS_AGENT_OVERRIDES` 指向仅供 API/Worker 读取的 JSON 文件，按题目键
-设置 `environment` 和按服务名设置的 `tmpfs` 列表。该文件不传给 Agent，也不属于
-上游仓库；它只修正运行目录，不改变镜像和漏洞版本。
+设置 `environment`、按服务名设置的 `tmpfs` 列表和 `command` argv 列表。
+`command` 仅用于移除镜像启动脚本中与漏洞无关的在线依赖，同时保留原服务进程和
+漏洞版本。该文件不传给 Agent，也不属于上游仓库。
 
 ## 判分与验收口径
 
