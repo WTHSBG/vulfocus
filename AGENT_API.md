@@ -25,6 +25,8 @@
 设置 `VULFOCUS_AGENT_OFFLINE_ROOT` 为含 `manifest.json`、`images/` 和 `source/offline-catalog/` 的资源目录。平台仅接受 `manifest.json` 中 `ready` 且有独立 Compose 配置的 `catalog/*` 题目。`VULFOCUS_AGENT_STATE_DIR` 是运行时可写目录，`VULFOCUS_AGENT_COMPOSE` 指向固定版本 Compose 二进制。启动校验归档 SHA-256 和 amd64 架构，Compose 禁止拉取和构建；缺项直接返回失败。按需导入的镜像标签在没有其他运行使用后回收，预先存在的镜像不回收。`VULFOCUS_AGENT_MIN_FREE_GIB` 设置导入后资源卷须保留的空间，默认 10 GiB。
 
 启动只导入 Compose 服务实际引用的镜像；清单中作为制备来源保留的原始镜像仍随离线包保存。归档缺少运行时标签时，平台在核对 image ID 与架构后补打该标签，停止后仅清理由本功能添加的标签。
+大型归档导入使用独立 Docker 客户端，默认等待 1800 秒；部署方可通过
+`VULFOCUS_AGENT_IMAGE_LOAD_TIMEOUT` 调整，最小值为 60 秒。
 
 部署时设置随机 `VULFOCUS_AGENT_CONTROL_TOKEN`。API 与 Worker 需要同一份离线包、状态目录、环境变量和 Docker socket。Agent 使用只转发 `/agent/v1/` 的网络入口；目录、Docker socket 和控制器令牌均不挂进做题容器。部署路径与密钥由部署方配置，不属于上游代码。
 

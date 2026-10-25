@@ -210,10 +210,24 @@ def ensure_images(item):
                 # Docker's image-load endpoint accepts gzip directly. Streaming
                 # the compressed archive avoids re-expanding many gigabytes in
                 # the worker and over the Unix socket.
-                with archive.open('rb') as source:
-                    for event in api_docker_client.load_image(source, quiet=True):
-                        if event.get('error'):
-                            raise RuntimeError('Docker 导入失败：' + event['error'])
+                # Large offline archives can take several minutes to load.
+                # The platform's shared Docker client defaults to 60 seconds,
+                # which reports a false startup failure while dockerd keeps
+                # importing the image in the background.
+                import docker
+                timeout = int(os.environ.get('VULFOCUS_AGENT_IMAGE_LOAD_TIMEOUT', '1800'))
+                if timeout < 60:
+                    raise RuntimeError('镜像导入超时必须至少为 60 秒')
+                loader = docker.APIClient(base_url='unix:///var/run/docker.sock',
+                                          version=api_docker_client._version,
+                                          timeout=timeout)
+                try:
+                    with archive.open('rb') as source:
+                        for event in loader.load_image(source, quiet=True):
+                            if event.get('error'):
+                                raise RuntimeError('Docker 导入失败：' + event['error'])
+                finally:
+                    loader.close()
                 if tag not in archive_tags:
                     loaded = client.images.get(archive_tags[0])
                     verify_loaded_image(loaded, record, image_key)
