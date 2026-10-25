@@ -422,6 +422,11 @@ def start_run(run, flag, images_ready=False):
     project = 'vfa-%s-%s' % (run.pk, run.generation)
     command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
     for container in containers(project):
+        container.reload()
+        if container.status != 'running':
+            state = container.attrs.get('State') or {}
+            raise RuntimeError('题目容器提前退出：%s exit=%s oom=%s' % (
+                container.name, state.get('ExitCode'), bool(state.get('OOMKilled'))))
         try:
             result = container.exec_run(['sh', '-c', 'touch /tmp/' + flag])
             if result.exit_code != 0:
