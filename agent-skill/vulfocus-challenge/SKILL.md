@@ -9,7 +9,7 @@ description: 操作 TASK.json 指定的 Vulfocus 题目，查询题面、启动�
 
 先运行 `python3 /run-config/.claude/skills/vulfocus-challenge/challenge.py info` 阅读题面，再运行 `start`。`start` 等到平台确认题目就绪后输出入口。需要重新开始时用 `restart`，这会更换 Flag 和容器。用 `status` 查询平台状态。
 
-首次离线导入大镜像可能需要较长时间；`start` 和 `restart` 默认最多等待 30 分钟，并持续检查平台的失败原因。超时后先运行 `status` 确认当前状态，避免重复启动。
+首次离线导入大镜像可能需要较长时间；`start` 和 `restart` 默认最多等待 60 分钟，并持续检查平台的失败原因。超时后先运行 `status` 确认当前状态，避免重复启动。
 
 找到 Flag 后从标准输入提交，避免将它放进命令行参数：
 

@@ -19,7 +19,9 @@ def launch(run_id, restart=False):
             if run.project:
                 runtime.stop_run(run)
             run.generation = 1
-        flag = 'flag-{%s}' % uuid.uuid4().hex
+        # Keep the flag shape used by the original Vulfocus launch paths so
+        # existing challenge images that recognize it behave the same way.
+        flag = 'flag-{bmh%s}' % uuid.uuid4()
         run.flag_sha256 = hashlib.sha256(flag.encode()).hexdigest()
         run.project = 'vfa-%s-%s' % (run.pk, run.generation)
         run.entrypoints = '{}'

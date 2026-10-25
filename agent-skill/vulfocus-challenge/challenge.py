@@ -78,7 +78,7 @@ def main():
         result = call(data, 'POST', args.operation, {})
         if args.operation in ('start', 'restart'):
             result = wait(data, {'running'}, int(os.environ.get(
-                'VULFOCUS_AGENT_START_TIMEOUT', '1800')))
+                'VULFOCUS_AGENT_START_TIMEOUT', '3600')))
         elif args.operation == 'stop':
             result = wait(data, {'stopped'}, int(os.environ.get(
                 'VULFOCUS_AGENT_STOP_TIMEOUT', '600')))
