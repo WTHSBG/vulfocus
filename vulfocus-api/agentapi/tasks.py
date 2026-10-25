@@ -32,16 +32,23 @@ def launch(run_id, restart=False):
                 project=run.project, entrypoints='{}', error='')
         if not accepted:
             return
-        project, endpoints = runtime.start_run(run, flag)
-        import json
-        updated = AgentRun.objects.filter(pk=run_id,
-            status__in=('starting', 'restarting')).update(
-                project=project, entrypoints=json.dumps(endpoints), status='running')
-        if not updated:
-            # A timeout or cancellation may request cleanup while an image is
-            # being imported. Never resurrect that run as "running".
-            runtime.stop_run(run)
-            return
+        # Archive verification and import may be slow. Keep it outside the
+        # per-run lock so cancellation can be requested while it proceeds.
+        runtime.ensure_images(runtime.unit(run.challenge_key))
+        run_lock = runtime.locked('run-%s' % run_id)
+        try:
+            project, endpoints = runtime.start_run(run, flag, images_ready=True)
+            import json
+            updated = AgentRun.objects.filter(pk=run_id,
+                status__in=('starting', 'restarting')).update(
+                    project=project, entrypoints=json.dumps(endpoints), status='running')
+            if not updated:
+                # Cleanup may have been requested during Compose startup.
+                # Stop before letting halt report the run as stopped.
+                runtime.stop_run(run)
+                return
+        finally:
+            run_lock.close()
     except Exception as exc:
         try:
             runtime.capture_failure(run)
@@ -61,18 +68,26 @@ def launch(run_id, restart=False):
 
 @shared_task(name='agentapi.halt')
 def halt(run_id):
-    run = AgentRun.objects.get(pk=run_id)
+    run_lock = runtime.locked('run-%s' % run_id)
+    run = None
     try:
-        runtime.stop_run(run)
-        run.status = 'stopped'
-        run.error = ''
-        run.entrypoints = '{}'
-        run.save()
+        # Re-read after taking the lock: launch may have advanced the
+        # generation or completed startup while this task waited.
+        run = AgentRun.objects.get(pk=run_id)
+        try:
+            runtime.stop_run(run)
+            run.status = 'stopped'
+            run.error = ''
+            run.entrypoints = '{}'
+            run.save()
+        except Exception as exc:
+            run.status = 'failed'
+            run.error = '停止失败：' + str(exc)
+            run.save()
+    finally:
+        run_lock.close()
+    if run is not None and run.status == 'stopped':
         try:
             runtime.release_images(run)
         except Exception:
             pass  # The target is stopped; image reclamation can be retried.
-    except Exception as exc:
-        run.status = 'failed'
-        run.error = '停止失败：' + str(exc)
-        run.save()

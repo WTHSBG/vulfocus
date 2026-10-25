@@ -77,15 +77,44 @@ class AgentApiTests(TestCase):
         run.status = 'starting'
         run.save()
 
-        def cancelled(current, flag):
+        def cancelled(current, flag, images_ready=False):
+            self.assertTrue(images_ready)
             AgentRun.objects.filter(pk=current.pk).update(status='stopping')
             return current.project, {'80/tcp': '127.0.0.1:30000'}
 
         start_run.side_effect = cancelled
-        launch.run(run.pk)
+        with patch('agentapi.tasks.runtime.unit', return_value={'tasks': []}), \
+             patch('agentapi.tasks.runtime.ensure_images'), \
+             patch('agentapi.tasks.runtime.locked', return_value=io.StringIO()):
+            launch.run(run.pk)
         run.refresh_from_db()
         self.assertEqual(run.status, 'stopping')
         stop_run.assert_called_once()
+
+    @patch('agentapi.tasks.runtime.release_images')
+    @patch('agentapi.tasks.runtime.stop_run')
+    def test_halt_reads_latest_generation_after_run_lock(self, stop_run, release):
+        from .tasks import halt
+        self.provision()
+        run = AgentRun.objects.get(run_key='case-1')
+        run.status = 'stopping'
+        run.generation = 1
+        run.project = 'old-project'
+        run.save()
+
+        def acquire(name):
+            self.assertEqual(name, 'run-%s' % run.pk)
+            AgentRun.objects.filter(pk=run.pk).update(
+                generation=2, project='new-project')
+            return io.StringIO()
+
+        with patch('agentapi.tasks.runtime.locked', side_effect=acquire):
+            halt.run(run.pk)
+        stopped = stop_run.call_args[0][0]
+        self.assertEqual((stopped.generation, stopped.project), (2, 'new-project'))
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'stopped')
+        release.assert_called_once()
 
     def test_override_replaces_fixed_host_ports(self):
         from .runtime import write_override

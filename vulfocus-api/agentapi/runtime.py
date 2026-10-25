@@ -348,9 +348,10 @@ def wait_ready(project, service):
     raise RuntimeError('题目未就绪：' + last[:300])
 
 
-def start_run(run, flag):
+def start_run(run, flag, images_ready=False):
     item = unit(run.challenge_key)
-    ensure_images(item)
+    if not images_ready:
+        ensure_images(item)
     # Import can take minutes. A scheduler timeout may have withdrawn the run
     # while it waited, so do not create a target after cancellation.
     from .models import AgentRun
