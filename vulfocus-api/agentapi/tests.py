@@ -160,7 +160,11 @@ class AgentApiTests(TestCase):
         self.assertEqual(result['flag_support_status'], 'supported')
 
     def test_challenge_description_omits_explicit_payload(self):
-        from .runtime import public_challenge
+        from .runtime import public_challenge, question_description
+        self.assertEqual(question_description('An issue. cmd=whoami'), 'An issue.')
+        self.assertEqual(question_description('An issue. GET /admin'), 'An issue.')
+        self.assertEqual(question_description('An issue. https://example.org/poc'),
+                         'An issue.')
         key = 'catalog/example'
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'compose.yml').write_text(

@@ -87,15 +87,23 @@ def public_challenge(key):
         title = ((record or {}).get('image_vul_name') or fallback_name or key)
     flag_status = ('generated' if not record else
                    'supported' if str(record.get('is_flag')) == '1' else 'unsupported')
-    description = (record or {}).get('image_desc') or ''
-    explicit_solution = re.search(r'payload|\bpoc\b|\bexp\b|利用方法|复现步骤|curl\s',
-                                  description, re.IGNORECASE)
-    if explicit_solution:
-        description = description[:explicit_solution.start()].strip()
+    description = question_description((record or {}).get('image_desc') or '')
     return {'challenge_key': key, 'title': title,
             'description': description,
             'flag_supported': flag_status != 'unsupported',
             'flag_support_status': flag_status}
+
+
+def question_description(source):
+    """Keep context while dropping catalog text that starts an exploit recipe."""
+    marker = re.search(
+        r'payload|\bpoc\b|\bexp\b|利用方法|利用方式|复现步骤|复现方法|测试步骤|'
+        r'攻击步骤|curl\s|wget\s|https?://|<code|<pre|```|'
+        r'\b(?:GET|POST|PUT|DELETE)\s+/|cmd\s*=|/etc/passwd|\bwhoami\b|\bid;',
+        source, re.IGNORECASE)
+    if marker:
+        source = source[:marker.start()]
+    return source.split('\n\n', 1)[0].strip()[:600]
 
 
 def compose_path(item):
