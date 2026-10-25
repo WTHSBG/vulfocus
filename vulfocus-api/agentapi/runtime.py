@@ -239,7 +239,8 @@ def primary_service(compose):
 
 
 def write_override(compose, target, environment, destination,
-                   service_tmpfs=None, service_commands=None):
+                   service_tmpfs=None, service_commands=None,
+                   service_cap_add=None, service_devices=None):
     """Publish each container port on a fresh host port for this run.
 
     The offline catalog preserves upstream Compose files, some of which pin
@@ -257,7 +258,10 @@ def write_override(compose, target, environment, destination,
     services = {}
     service_tmpfs = service_tmpfs or {}
     service_commands = service_commands or {}
-    unknown = (set(service_tmpfs) | set(service_commands)) - set(source.get('services') or {})
+    service_cap_add = service_cap_add or {}
+    service_devices = service_devices or {}
+    unknown = (set(service_tmpfs) | set(service_commands) |
+               set(service_cap_add) | set(service_devices)) - set(source.get('services') or {})
     if unknown:
         raise RuntimeError('临时目录配置指向未知服务：' + ', '.join(sorted(unknown)))
     for name, original in (source.get('services') or {}).items():
@@ -278,6 +282,25 @@ def write_override(compose, target, environment, destination,
                     isinstance(part, str) and part for part in command):
                 raise RuntimeError('启动命令配置无效：' + name)
             patch['command'] = command
+        if name in service_cap_add:
+            caps = service_cap_add[name]
+            if not isinstance(caps, list) or not caps or not all(
+                    isinstance(cap, str) and re.fullmatch(r'[A-Z_]+', cap)
+                    and cap != 'ALL' for cap in caps):
+                raise RuntimeError('容器能力配置无效：' + name)
+            patch['cap_add'] = caps
+        if name in service_devices:
+            devices = service_devices[name]
+            if not isinstance(devices, list) or not devices:
+                raise RuntimeError('容器设备配置无效：' + name)
+            for device in devices:
+                parts = device.split(':') if isinstance(device, str) else []
+                if (len(parts) not in (2, 3) or not parts[0].startswith('/dev/')
+                        or not parts[1].startswith('/dev/') or
+                        'docker.sock' in device or
+                        (len(parts) == 3 and parts[2] not in ('r', 'w', 'rw', 'rwm'))):
+                    raise RuntimeError('容器设备配置无效：' + name)
+            patch['devices'] = devices
         if patch:
             services[name] = patch
     destination.write_text(yaml.dump({'services': services}, Dumper=Dumper,
@@ -382,6 +405,8 @@ def start_run(run, flag, images_ready=False):
     environment = {'vul_flag': flag}
     service_tmpfs = {}
     service_commands = {}
+    service_cap_add = {}
+    service_devices = {}
     overrides_path = os.environ.get('VULFOCUS_AGENT_OVERRIDES')
     if overrides_path:
         overrides = json.loads(Path(overrides_path).read_text())
@@ -389,8 +414,11 @@ def start_run(run, flag, images_ready=False):
         environment.update(challenge_override.get('environment', {}))
         service_tmpfs = challenge_override.get('tmpfs', {})
         service_commands = challenge_override.get('command', {})
+        service_cap_add = challenge_override.get('cap_add', {})
+        service_devices = challenge_override.get('devices', {})
     write_override(compose, service, environment, override,
-                   service_tmpfs, service_commands)
+                   service_tmpfs, service_commands,
+                   service_cap_add, service_devices)
     project = 'vfa-%s-%s' % (run.pk, run.generation)
     command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
     for container in containers(project):
