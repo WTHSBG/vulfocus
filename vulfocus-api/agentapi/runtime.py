@@ -296,6 +296,12 @@ def wait_ready(project, service):
 def start_run(run, flag):
     item = unit(run.challenge_key)
     ensure_images(item)
+    # Import can take minutes. A scheduler timeout may have withdrawn the run
+    # while it waited, so do not create a target after cancellation.
+    from .models import AgentRun
+    if not AgentRun.objects.filter(pk=run.pk,
+            status__in=('starting', 'restarting')).exists():
+        raise RuntimeError('题目启动已取消')
     compose = compose_path(item)
     service = primary_service(compose)
     root = state_root() / ('run-' + str(run.pk))

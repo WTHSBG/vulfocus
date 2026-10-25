@@ -131,3 +131,15 @@ class AgentApiTests(TestCase):
         docker_client.images.get.return_value.id = 'sha256:expected'
         ensure_images({'tasks': ['image-key']})
         docker_client.images.get.assert_called_once_with('ctf-offline/runtime:image-key')
+
+    @patch('agentapi.runtime.compose_path', side_effect=AssertionError('started after cancellation'))
+    @patch('agentapi.runtime.ensure_images')
+    @patch('agentapi.runtime.unit', return_value={'tasks': ['image-key']})
+    def test_cancelled_during_import_does_not_start(self, _unit, _images, _compose):
+        from .runtime import start_run
+        self.provision()
+        run = AgentRun.objects.get(run_key='case-1')
+        run.status = 'stopped'
+        run.save()
+        with self.assertRaisesRegex(RuntimeError, '已取消'):
+            start_run(run, 'flag-{test}')
