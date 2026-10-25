@@ -32,12 +32,12 @@
 
 少数镜像需要在启动时补齐可写目录或固定本地数据库路径。部署方可用
 `VULFOCUS_AGENT_OVERRIDES` 指向仅供 API/Worker 读取的 JSON 文件，按题目键
-设置 `environment`、按服务名设置的 `tmpfs`、`command` argv、`cap_add`、
-`devices` 和 `mounts` 列表。`mounts` 的每项含相对于离线包根目录的 `source`
+设置 `environment`、按服务名设置的 `tmpfs`、`command` argv、`entrypoint`
+argv、`cap_add`、`devices` 和 `mounts` 列表。`mounts` 的每项含相对于离线包根目录的 `source`
 及容器内绝对路径 `target`，仅以只读方式挂载包内现有文件。部署时离线包在
 API/Worker 容器内与 Docker 宿主机上必须使用相同绝对路径。
-`command` 仅用于移除镜像启动脚本中与漏洞无关的在线依赖，同时保留原服务进程和
-漏洞版本。该文件不传给 Agent，也不属于上游仓库。
+`command` 和 `entrypoint` 仅用于修复镜像启动脚本中的环境依赖或权限问题，
+同时保留原服务进程和漏洞版本。该文件不传给 Agent，也不属于上游仓库。
 
 ## 判分与验收口径
 

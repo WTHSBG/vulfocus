@@ -133,7 +133,8 @@ class AgentApiTests(TestCase):
                     {'master': ['/bin/sh', '-c', 'exec app']},
                     {'master': ['NET_ADMIN']},
                     {'master': ['/dev/net/tun:/dev/net/tun']},
-                    {'master': [{'source': 'app.py', 'target': '/app/app.py'}]})
+                    {'master': [{'source': 'app.py', 'target': '/app/app.py'}]},
+                    {'master': ['/bin/sh', '/usr/local/bin/preflight.sh']})
             text = output.read_text()
         self.assertEqual(text.count('!override'), 2)
         self.assertNotIn('8080:8080', text)
@@ -145,6 +146,7 @@ class AgentApiTests(TestCase):
         self.assertIn('NET_ADMIN', text)
         self.assertIn('/dev/net/tun', text)
         self.assertIn(str(app) + ':/app/app.py:ro', text)
+        self.assertIn('/usr/local/bin/preflight.sh', text)
 
     def test_read_only_mount_cannot_escape_package(self):
         from .runtime import write_override

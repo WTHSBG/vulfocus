@@ -255,7 +255,7 @@ def primary_service(compose):
 def write_override(compose, target, environment, destination,
                    service_tmpfs=None, service_commands=None,
                    service_cap_add=None, service_devices=None,
-                   service_mounts=None):
+                   service_mounts=None, service_entrypoints=None):
     """Publish each container port on a fresh host port for this run.
 
     The offline catalog preserves upstream Compose files, some of which pin
@@ -276,9 +276,10 @@ def write_override(compose, target, environment, destination,
     service_cap_add = service_cap_add or {}
     service_devices = service_devices or {}
     service_mounts = service_mounts or {}
+    service_entrypoints = service_entrypoints or {}
     unknown = (set(service_tmpfs) | set(service_commands) |
                set(service_cap_add) | set(service_devices) |
-               set(service_mounts)) - set(source.get('services') or {})
+               set(service_mounts) | set(service_entrypoints)) - set(source.get('services') or {})
     if unknown:
         raise RuntimeError('临时目录配置指向未知服务：' + ', '.join(sorted(unknown)))
     for name, original in (source.get('services') or {}).items():
@@ -299,6 +300,13 @@ def write_override(compose, target, environment, destination,
                     isinstance(part, str) and part for part in command):
                 raise RuntimeError('启动命令配置无效：' + name)
             patch['command'] = command
+        if name in service_entrypoints:
+            entrypoint = service_entrypoints[name]
+            if (not isinstance(entrypoint, list) or not entrypoint or
+                    not all(isinstance(part, str) and part for part in entrypoint) or
+                    not entrypoint[0].startswith('/')):
+                raise RuntimeError('入口命令配置无效：' + name)
+            patch['entrypoint'] = entrypoint
         if name in service_cap_add:
             caps = service_cap_add[name]
             if not isinstance(caps, list) or not caps or not all(
@@ -449,6 +457,7 @@ def start_run(run, flag, images_ready=False):
     service_cap_add = {}
     service_devices = {}
     service_mounts = {}
+    service_entrypoints = {}
     overrides_path = os.environ.get('VULFOCUS_AGENT_OVERRIDES')
     if overrides_path:
         overrides = json.loads(Path(overrides_path).read_text())
@@ -459,9 +468,11 @@ def start_run(run, flag, images_ready=False):
         service_cap_add = challenge_override.get('cap_add', {})
         service_devices = challenge_override.get('devices', {})
         service_mounts = challenge_override.get('mounts', {})
+        service_entrypoints = challenge_override.get('entrypoint', {})
     write_override(compose, service, environment, override,
                    service_tmpfs, service_commands,
-                   service_cap_add, service_devices, service_mounts)
+                   service_cap_add, service_devices, service_mounts,
+                   service_entrypoints)
     project = 'vfa-%s-%s' % (run.pk, run.generation)
     command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
     for container in containers(project):
