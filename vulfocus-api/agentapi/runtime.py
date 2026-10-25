@@ -240,7 +240,8 @@ def primary_service(compose):
 
 def write_override(compose, target, environment, destination,
                    service_tmpfs=None, service_commands=None,
-                   service_cap_add=None, service_devices=None):
+                   service_cap_add=None, service_devices=None,
+                   service_mounts=None):
     """Publish each container port on a fresh host port for this run.
 
     The offline catalog preserves upstream Compose files, some of which pin
@@ -260,8 +261,10 @@ def write_override(compose, target, environment, destination,
     service_commands = service_commands or {}
     service_cap_add = service_cap_add or {}
     service_devices = service_devices or {}
+    service_mounts = service_mounts or {}
     unknown = (set(service_tmpfs) | set(service_commands) |
-               set(service_cap_add) | set(service_devices)) - set(source.get('services') or {})
+               set(service_cap_add) | set(service_devices) |
+               set(service_mounts)) - set(source.get('services') or {})
     if unknown:
         raise RuntimeError('临时目录配置指向未知服务：' + ', '.join(sorted(unknown)))
     for name, original in (source.get('services') or {}).items():
@@ -301,6 +304,30 @@ def write_override(compose, target, environment, destination,
                         (len(parts) == 3 and parts[2] not in ('r', 'w', 'rw', 'rwm'))):
                     raise RuntimeError('容器设备配置无效：' + name)
             patch['devices'] = devices
+        if name in service_mounts:
+            mounts = service_mounts[name]
+            if not isinstance(mounts, list) or not mounts:
+                raise RuntimeError('只读挂载配置无效：' + name)
+            bindings = []
+            root = package_root()
+            for mount in mounts:
+                if not isinstance(mount, dict) or set(mount) != {'source', 'target'}:
+                    raise RuntimeError('只读挂载配置无效：' + name)
+                relative = mount['source']
+                destination_path = mount['target']
+                if (not isinstance(relative, str) or not relative or
+                        ':' in relative or '\n' in relative or
+                        Path(relative).is_absolute() or '..' in Path(relative).parts or
+                        not isinstance(destination_path, str) or
+                        not destination_path.startswith('/') or
+                        ':' in destination_path or '\n' in destination_path or
+                        '..' in Path(destination_path).parts):
+                    raise RuntimeError('只读挂载配置无效：' + name)
+                host_path = (root / relative).resolve()
+                if root not in host_path.parents or not host_path.is_file():
+                    raise RuntimeError('只读挂载源文件不存在：' + relative)
+                bindings.append('%s:%s:ro' % (host_path, destination_path))
+            patch['volumes'] = bindings
         if patch:
             services[name] = patch
     destination.write_text(yaml.dump({'services': services}, Dumper=Dumper,
@@ -407,6 +434,7 @@ def start_run(run, flag, images_ready=False):
     service_commands = {}
     service_cap_add = {}
     service_devices = {}
+    service_mounts = {}
     overrides_path = os.environ.get('VULFOCUS_AGENT_OVERRIDES')
     if overrides_path:
         overrides = json.loads(Path(overrides_path).read_text())
@@ -416,9 +444,10 @@ def start_run(run, flag, images_ready=False):
         service_commands = challenge_override.get('command', {})
         service_cap_add = challenge_override.get('cap_add', {})
         service_devices = challenge_override.get('devices', {})
+        service_mounts = challenge_override.get('mounts', {})
     write_override(compose, service, environment, override,
                    service_tmpfs, service_commands,
-                   service_cap_add, service_devices)
+                   service_cap_add, service_devices, service_mounts)
     project = 'vfa-%s-%s' % (run.pk, run.generation)
     command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
     for container in containers(project):

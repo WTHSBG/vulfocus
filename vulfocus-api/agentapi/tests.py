@@ -121,15 +121,19 @@ class AgentApiTests(TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'source.yml'
             output = Path(directory) / 'override.yml'
+            app = Path(directory) / 'app.py'
+            app.write_text('app = object()\n')
             source.write_text('services:\n  master:\n    ports:\n      - "8080:8080"\n'
                               '  slave:\n    ports:\n      - "8081:8081"\n')
-            write_override(source, 'master', {
-                'vul_flag': 'test-flag',
-                'LANGFLOW_DATABASE_URL': 'sqlite:////app/data/langflow.db'},
-                output, {'master': ['/app/data:uid=1000,gid=0,mode=1777']},
-                {'master': ['/bin/sh', '-c', 'exec app']},
-                {'master': ['NET_ADMIN']},
-                {'master': ['/dev/net/tun:/dev/net/tun']})
+            with patch.dict(os.environ, {'VULFOCUS_AGENT_OFFLINE_ROOT': directory}):
+                write_override(source, 'master', {
+                    'vul_flag': 'test-flag',
+                    'LANGFLOW_DATABASE_URL': 'sqlite:////app/data/langflow.db'},
+                    output, {'master': ['/app/data:uid=1000,gid=0,mode=1777']},
+                    {'master': ['/bin/sh', '-c', 'exec app']},
+                    {'master': ['NET_ADMIN']},
+                    {'master': ['/dev/net/tun:/dev/net/tun']},
+                    {'master': [{'source': 'app.py', 'target': '/app/app.py'}]})
             text = output.read_text()
         self.assertEqual(text.count('!override'), 2)
         self.assertNotIn('8080:8080', text)
@@ -140,6 +144,19 @@ class AgentApiTests(TestCase):
         self.assertIn('exec app', text)
         self.assertIn('NET_ADMIN', text)
         self.assertIn('/dev/net/tun', text)
+        self.assertIn(str(app) + ':/app/app.py:ro', text)
+
+    def test_read_only_mount_cannot_escape_package(self):
+        from .runtime import write_override
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.yml'
+            output = Path(directory) / 'override.yml'
+            source.write_text('services:\n  target: {}\n')
+            with patch.dict(os.environ, {'VULFOCUS_AGENT_OFFLINE_ROOT': directory}):
+                with self.assertRaisesRegex(RuntimeError, '只读挂载配置无效'):
+                    write_override(source, 'target', {'vul_flag': 'test'}, output,
+                                   service_mounts={'target': [
+                                       {'source': '../app.py', 'target': '/app/app.py'}]})
 
     def test_challenge_title_and_flag_status_resolve_by_image_name(self):
         from .runtime import public_challenge
