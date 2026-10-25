@@ -115,6 +115,13 @@ def locked(name):
     return stream
 
 
+def verify_loaded_image(image, record, image_key):
+    if image.id != record['image_id']:
+        raise RuntimeError('本地镜像与离线清单的固定版本不一致：' + image_key)
+    if image.attrs.get('Os') != 'linux' or image.attrs.get('Architecture') != 'amd64':
+        raise RuntimeError('本地镜像不是 linux/amd64：' + image_key)
+
+
 def ensure_images(item):
     manifest = catalog()
     # Reusing an already verified local image must not wait behind an unrelated
@@ -129,8 +136,7 @@ def ensure_images(item):
             raise RuntimeError('镜像架构不是 amd64：' + image_key)
         try:
             present = client.images.get('ctf-offline/runtime:' + image_key)
-            if present.id != record['image_id']:
-                raise RuntimeError('本地镜像与离线清单的固定版本不一致：' + image_key)
+            verify_loaded_image(present, record, image_key)
         except ImageNotFound:
             all_present = False
     if all_present:
@@ -148,8 +154,7 @@ def ensure_images(item):
             tag = 'ctf-offline/runtime:' + image_key
             try:
                 present = client.images.get(tag)
-                if present.id != record['image_id']:
-                    raise RuntimeError('本地镜像与离线清单的固定版本不一致：' + image_key)
+                verify_loaded_image(present, record, image_key)
                 continue
             except ImageNotFound:
                 pass
@@ -179,8 +184,7 @@ def ensure_images(item):
                     if event.get('error'):
                         raise RuntimeError('Docker 导入失败：' + event['error'])
             imported = client.images.get(tag)
-            if imported.id != record['image_id']:
-                raise RuntimeError('导入镜像与离线清单的固定版本不一致：' + image_key)
+            verify_loaded_image(imported, record, image_key)
             managed[image_key] = new_tags
             temporary = managed_path.with_suffix('.tmp')
             temporary.write_text(json.dumps(managed))

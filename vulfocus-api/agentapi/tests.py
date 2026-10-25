@@ -129,8 +129,23 @@ class AgentApiTests(TestCase):
             'status': 'verified', 'architecture': 'amd64',
             'image_id': 'sha256:expected'}}}
         docker_client.images.get.return_value.id = 'sha256:expected'
+        docker_client.images.get.return_value.attrs = {'Os': 'linux',
+                                                         'Architecture': 'amd64'}
         ensure_images({'tasks': ['image-key']})
         docker_client.images.get.assert_called_once_with('ctf-offline/runtime:image-key')
+
+    @patch('agentapi.runtime.client')
+    @patch('agentapi.runtime.catalog')
+    def test_existing_wrong_architecture_is_rejected(self, catalog, docker_client):
+        from .runtime import ensure_images
+        catalog.return_value = {'images': {'image-key': {
+            'status': 'verified', 'architecture': 'amd64',
+            'image_id': 'sha256:expected'}}}
+        docker_client.images.get.return_value.id = 'sha256:expected'
+        docker_client.images.get.return_value.attrs = {'Os': 'linux',
+                                                         'Architecture': 'arm64'}
+        with self.assertRaisesRegex(RuntimeError, 'linux/amd64'):
+            ensure_images({'tasks': ['image-key']})
 
     @patch('agentapi.runtime.compose_path', side_effect=AssertionError('started after cancellation'))
     @patch('agentapi.runtime.ensure_images')
