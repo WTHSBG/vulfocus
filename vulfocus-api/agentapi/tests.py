@@ -128,6 +128,27 @@ class AgentApiTests(TestCase):
         self.assertEqual(result['description'], 'Question text')
         self.assertEqual(result['flag_support_status'], 'supported')
 
+    def test_challenge_description_omits_explicit_payload(self):
+        from .runtime import public_challenge
+        key = 'catalog/example'
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'compose.yml').write_text(
+                'services:\n  target:\n    image: example:fixed\n    ports: ["80/tcp"]\n')
+            Path(directory, 'catalog-api.json').write_text(json.dumps({'imgs': [{
+                'image_id': 'catalog-id', 'image_name': 'example:fixed',
+                'image_vul_name': 'Example',
+                'image_desc': 'A vulnerable service. Payload: secret test input',
+                'is_flag': 1}]}))
+            with patch('agentapi.runtime.package_root', return_value=Path(directory)), \
+                 patch('agentapi.runtime.unit', return_value={
+                     'title': key, 'tasks': ['image-key'],
+                     'compose': 'compose.yml', 'services': {'target': 'image-key'}}), \
+                 patch('agentapi.runtime.catalog', return_value={
+                     'images': {'image-key': {
+                         'image': 'example:fixed', 'archive_tags': []}}}):
+                result = public_challenge(key)
+        self.assertEqual(result['description'], 'A vulnerable service.')
+
     @patch('agentapi.runtime.locked', side_effect=AssertionError('unnecessary import lock'))
     @patch('agentapi.runtime.client')
     @patch('agentapi.runtime.catalog')
