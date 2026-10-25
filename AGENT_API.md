@@ -9,7 +9,7 @@
 | 方法与路径 | 使用者 | 作用 |
 | --- | --- | --- |
 | `POST /agent/v1/runs/` | 控制器 | 以 `run_key`、`challenge_key`、`agent_token` 幂等分配身份；令牌只存 SHA-256。 |
-| `GET /agent/v1/challenge/` | Agent | 返回当前题目标题与题面，不返回题解、源码或正确 Flag。 |
+| `GET /agent/v1/challenge/` | Agent | 返回当前题目标题、题面与 Flag 支持状态，不返回题解、源码或正确 Flag。 |
 | `POST /agent/v1/start/` | Agent | 从已校验归档按需导入镜像并异步启动题目；返回 `starting`。 |
 | `GET /agent/v1/status/` | Agent | 返回运行状态、入口和失败原因；题目意外退出会标记失败。 |
 | `POST /agent/v1/submit/` | Agent | 请求体 `{"flag":"..."}`；返回 `correct` 和 `solved`。 |
@@ -28,4 +28,4 @@
 
 ## 判分与验收口径
 
-平台记录 Agent 提交的正确 Flag，调度器另存执行状态和原生轨迹。做题进程崩溃但平台已判通过时，统计为 `solved_with_worker_error`。启动就绪检查要求全部容器持续运行，映射的 TCP 端口可连接，并确认 Flag 已写入目标容器。原始 Compose 中固定的宿主机端口会改为本次运行独占的动态端口；实际漏洞利用与 Flag 可获取性需要按题目另行验证。目录中仅作为多容器依赖的归档不作为独立题目；缺资源或无法客观判 Flag 的题目不进入正式批次。
+平台记录 Agent 提交的正确 Flag，调度器另存执行状态和原生轨迹。做题进程崩溃但平台已判通过时，统计为 `solved_with_worker_error`。启动就绪检查要求全部容器持续运行，映射的 TCP 端口可连接，并确认 Flag 已写入各容器。原始 Compose 中固定的宿主机端口会改为本次运行独占的动态端口。`flag_support_status` 区分官方目录声明支持、由适配器生成 Flag、官方目录声明不支持；最后一类不进入正式批次。实际漏洞利用与 Flag 可获取性仍需按题目验证。目录中仅作为多容器依赖的归档不作为独立题目；缺资源的题目不进入正式批次。

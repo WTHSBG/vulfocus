@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -49,16 +50,53 @@ def unit(key):
 
 def public_challenge(key):
     item = unit(key)
-    desc = ''
+    manifest = catalog()
+    record = None
+    fallback_name = ''
     source = package_root() / 'catalog-api.json'
     if source.is_file():
+        import yaml
         suffix = key.rsplit('/', 1)[-1]
-        for image in json.loads(source.read_text()).get('imgs', []):
-            if image.get('image_id') == suffix:
-                desc = image.get('image_desc') or ''
-                break
-    return {'challenge_key': key, 'title': item.get('title') or key,
-            'description': desc, 'flag_supported': True}
+        images = json.loads(source.read_text()).get('imgs', [])
+        by_id = {image.get('image_id'): image for image in images}
+        by_name = {image.get('image_name'): image for image in images}
+        record = by_id.get(suffix)
+        if not record:
+            compose_services = yaml.safe_load(compose_path(item).read_text())['services']
+            exposed = [name for name, service in compose_services.items()
+                       if service.get('ports') and name not in
+                       ('db', 'mysql', 'redis', 'mongo', 'mongodb', 'postgres')]
+            for service_name in exposed:
+                image_key = item.get('services', {}).get(service_name)
+                if not image_key:
+                    continue
+                image = manifest['images'][image_key]
+                for name in [image.get('image')] + image.get('archive_tags', []):
+                    if not name:
+                        continue
+                    if name.startswith('docker.io/'):
+                        name = name[len('docker.io/'):]
+                    if not fallback_name and not name.startswith('ctf-offline/'):
+                        fallback_name = name.rsplit(':', 1)[0]
+                    record = by_name.get(name)
+                    if record:
+                        break
+                if record:
+                    break
+    title = item.get('title') or key
+    if title == key:
+        title = ((record or {}).get('image_vul_name') or fallback_name or key)
+    flag_status = ('generated' if not record else
+                   'supported' if str(record.get('is_flag')) == '1' else 'unsupported')
+    description = (record or {}).get('image_desc') or ''
+    explicit_solution = re.search(r'payload|\bpoc\b|\bexp\b|利用方法|复现步骤|curl\s',
+                                  description, re.IGNORECASE)
+    if explicit_solution:
+        description = description[:explicit_solution.start()].strip()
+    return {'challenge_key': key, 'title': title,
+            'description': description,
+            'flag_supported': flag_status != 'unsupported',
+            'flag_support_status': flag_status}
 
 
 def compose_path(item):

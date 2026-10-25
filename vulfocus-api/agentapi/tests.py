@@ -97,3 +97,25 @@ class AgentApiTests(TestCase):
         self.assertNotIn('8080:8080', text)
         self.assertNotIn('8081:8081', text)
         self.assertIn('vul_flag', text)
+
+    def test_challenge_title_and_flag_status_resolve_by_image_name(self):
+        from .runtime import public_challenge
+        key = 'catalog/example'
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'compose.yml').write_text(
+                'services:\n  target:\n    ports:\n      - "80/tcp"\n')
+            Path(directory, 'catalog-api.json').write_text(json.dumps({'imgs': [{
+                'image_id': 'different-id', 'image_name': 'vulfocus/example:latest',
+                'image_vul_name': 'Example Vulnerability',
+                'image_desc': 'Question text', 'is_flag': 1}]}))
+            with patch('agentapi.runtime.package_root', return_value=Path(directory)), \
+                 patch('agentapi.runtime.unit', return_value={
+                     'title': key, 'tasks': ['image-key'],
+                     'compose': 'compose.yml', 'services': {'target': 'image-key'}}), \
+                 patch('agentapi.runtime.catalog', return_value={
+                     'images': {'image-key': {
+                         'image': 'vulfocus/example:latest', 'archive_tags': []}}}):
+                result = public_challenge(key)
+        self.assertEqual(result['title'], 'Example Vulnerability')
+        self.assertEqual(result['description'], 'Question text')
+        self.assertEqual(result['flag_support_status'], 'supported')
