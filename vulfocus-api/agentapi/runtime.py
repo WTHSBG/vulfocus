@@ -4,7 +4,6 @@ The solver never receives a Docker socket or an archive path. The API and
 Celery worker need the same read-only package mount and writable state mount.
 """
 import fcntl
-import gzip
 import hashlib
 import json
 import os
@@ -200,8 +199,10 @@ def ensure_images(item):
                 existing_alias.tag('ctf-offline/runtime', tag=image_key)
                 new_tags = [tag]
             else:
-                # APIClient accepts a file-like stream, avoiding a multi-GB read.
-                with gzip.open(str(archive), 'rb') as source:
+                # Docker's image-load endpoint accepts gzip directly. Streaming
+                # the compressed archive avoids re-expanding many gigabytes in
+                # the worker and over the Unix socket.
+                with archive.open('rb') as source:
                     for event in api_docker_client.load_image(source, quiet=True):
                         if event.get('error'):
                             raise RuntimeError('Docker 导入失败：' + event['error'])
