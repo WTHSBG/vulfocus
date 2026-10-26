@@ -148,6 +148,23 @@ class AgentApiTests(TestCase):
         self.assertIn(str(app) + ':/app/app.py:ro', text)
         self.assertIn('/usr/local/bin/preflight.sh', text)
 
+    def test_agent_network_uses_configured_per_run_subnet(self):
+        from .runtime import challenge_network_subnet, write_override
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'VULFOCUS_AGENT_NETWORK_POOL': '198.18.0.0/15'}):
+            source = Path(directory) / 'source.yml'
+            output = Path(directory) / 'override.yml'
+            source.write_text('services:\n  target:\n    image: example\n')
+            first = challenge_network_subnet(1)
+            second = challenge_network_subnet(2)
+            self.assertEqual(first, '198.18.0.0/27')
+            self.assertEqual(second, '198.18.0.32/27')
+            write_override(source, 'target', {'vul_flag': 'test'}, output,
+                           network_subnet=second)
+            text = output.read_text()
+            self.assertIn('198.18.0.32/27', text)
+            self.assertIn('default:', text)
+
     def test_read_only_mount_cannot_escape_package(self):
         from .runtime import write_override
         with tempfile.TemporaryDirectory() as directory:

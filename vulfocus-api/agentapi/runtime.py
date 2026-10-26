@@ -5,6 +5,7 @@ Celery worker need the same read-only package mount and writable state mount.
 """
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -252,10 +253,26 @@ def primary_service(compose):
     return 'target' if 'target' in services else next(iter(services))
 
 
+def challenge_network_subnet(run_id):
+    """Use a small, repeatable subnet instead of exhausting Docker's defaults."""
+    value = os.environ.get('VULFOCUS_AGENT_NETWORK_POOL')
+    if not value:
+        return None
+    pool = ipaddress.ip_network(value, strict=True)
+    prefix = 27  # 30 usable addresses cover every supported Compose scenario.
+    if pool.version != 4 or pool.prefixlen > prefix:
+        raise RuntimeError('题目网络池必须是至少一个 /27 的 IPv4 网段')
+    slots = 1 << (prefix - pool.prefixlen)
+    index = (int(run_id) - 1) % slots
+    return str(ipaddress.ip_network((int(pool.network_address) + index * 32,
+                                     prefix)))
+
+
 def write_override(compose, target, environment, destination,
                    service_tmpfs=None, service_commands=None,
                    service_cap_add=None, service_devices=None,
-                   service_mounts=None, service_entrypoints=None):
+                   service_mounts=None, service_entrypoints=None,
+                   network_subnet=None):
     """Publish each container port on a fresh host port for this run.
 
     The offline catalog preserves upstream Compose files, some of which pin
@@ -352,7 +369,14 @@ def write_override(compose, target, environment, destination,
             patch['volumes'] = bindings
         if patch:
             services[name] = patch
-    destination.write_text(yaml.dump({'services': services}, Dumper=Dumper,
+    override = {'services': services}
+    if network_subnet:
+        subnet = ipaddress.ip_network(network_subnet, strict=True)
+        if subnet.version != 4 or subnet.prefixlen != 27:
+            raise RuntimeError('题目网络必须是 /27 IPv4 网段')
+        override['networks'] = {'default': {'ipam': {'config': [
+            {'subnet': str(subnet)}]}}}
+    destination.write_text(yaml.dump(override, Dumper=Dumper,
                                      sort_keys=False))
 
 
@@ -472,7 +496,8 @@ def start_run(run, flag, images_ready=False):
     write_override(compose, service, environment, override,
                    service_tmpfs, service_commands,
                    service_cap_add, service_devices, service_mounts,
-                   service_entrypoints)
+                   service_entrypoints,
+                   challenge_network_subnet(run.pk))
     project = 'vfa-%s-%s' % (run.pk, run.generation)
     command(project, compose, override, ['up', '-d', '--no-build', '--pull', 'never'])
     for container in containers(project):
