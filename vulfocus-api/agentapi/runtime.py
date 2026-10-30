@@ -525,7 +525,10 @@ def stop_run(run):
     if not override.is_file():
         override = directory / ('generation-%s.json' % run.generation)
     if override.is_file():
-        command(run.project, compose, override, ['down', '--remove-orphans'])
+        # Every Agent run has its own Compose project. Remove its anonymous and
+        # project-scoped named volumes with the containers so repeated runs do
+        # not fill Docker's data partition. Compose preserves external volumes.
+        command(run.project, compose, override, ['down', '--remove-orphans', '--volumes'])
 
 
 def capture_failure(run):

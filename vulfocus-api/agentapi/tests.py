@@ -116,6 +116,26 @@ class AgentApiTests(TestCase):
         self.assertEqual(run.status, 'stopped')
         release.assert_called_once()
 
+    def test_stop_run_removes_project_volumes(self):
+        from .runtime import stop_run
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / 'run-7'
+            folder.mkdir()
+            override = folder / 'generation-2.yml'
+            override.write_text('services: {}\n')
+            compose = root / 'challenge.yml'
+            compose.write_text('services: {}\n')
+            run = SimpleNamespace(pk=7, generation=2, project='vfa-7-2',
+                                  challenge_key='catalog/example')
+            with patch('agentapi.runtime.unit', return_value={}), \
+                 patch('agentapi.runtime.compose_path', return_value=compose), \
+                 patch('agentapi.runtime.state_root', return_value=root), \
+                 patch('agentapi.runtime.command') as command:
+                stop_run(run)
+            command.assert_called_once_with('vfa-7-2', compose, override,
+                ['down', '--remove-orphans', '--volumes'])
+
     def test_override_replaces_fixed_host_ports(self):
         from .runtime import write_override
         with tempfile.TemporaryDirectory() as directory:
